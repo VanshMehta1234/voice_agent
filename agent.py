@@ -25,7 +25,6 @@ from livekit.plugins import (
     cartesia,
     silero,
     turn_detector,
-    noise_cancellation,
 )
 
 
@@ -47,12 +46,22 @@ class OutboundCaller(Agent):
     ):
         super().__init__(
             instructions=f"""
-            You are a scheduling assistant for a dental practice. Your interface with user will be voice.
-            You will be on a call with a patient who has an upcoming appointment. Your goal is to confirm the appointment details.
-            As a customer service representative, you will be polite and professional at all times. Allow user to end the conversation.
-
-            When the user would like to be transferred to a human agent, first confirm with them. upon confirmation, use the transfer_call tool.
-            The customer's name is {name}. His appointment is on {appointment_time}.
+            You're a sales rep for Futurense Technologies. You're calling {name} about a Data Science certification program at IIT Mandi.
+            
+            Follow this conversation structure:
+            1) Introduce yourself by saying "Hi, I'm calling from Futurense Technologies. Do you have a minute to talk?" (STOP)
+            2) After they respond, say "I see that you're interested in our Data Science certification program at IIT Mandi" (STOP)
+            3) After they respond, ask "Where did you study from?" (STOP)
+            4) After they respond, ask about their graduation percentage/CGPA (STOP)
+            5) Thank them and say someone will reach out, then end the call
+            
+            Additional guidelines:
+            - Speak one dialogue at a time. Speak less and listen more.
+            - Talk at a slightly fast pace like a typical sales call.
+            - If the user expresses disinterest or negativity, politely apologize and end the call.
+            - If the user wants to be transferred to a human agent, use the transfer_call tool.
+            
+            Your interface with the user will be voice. Be conversational but concise.
             """
         )
         # keep reference to the participant for transfers
@@ -172,18 +181,58 @@ async def entrypoint(ctx: JobContext):
     # dial_info is a dict with the following keys:
     # - phone_number: the phone number to dial
     # - transfer_to: the phone number to transfer the call to when requested
-    dial_info = json.loads(ctx.job.metadata)
+    try:
+        # Try to parse JSON or handle various formats
+        if ctx.job.metadata:
+            logger.info(f"Raw metadata: {ctx.job.metadata}")
+            # Check if the metadata is already a string representation of a dict
+            if isinstance(ctx.job.metadata, str):
+                # Try to parse as JSON first
+                try:
+                    dial_info = json.loads(ctx.job.metadata)
+                except json.JSONDecodeError:
+                    # It could be a string that's quoted/escaped incorrectly
+                    # Try to extract the phone number using a simple match
+                    import re
+                    phone_match = re.search(r'phone_number[\'"\s:]+([+\d]+)', ctx.job.metadata)
+                    transfer_match = re.search(r'transfer_to[\'"\s:]+([+\d]+)', ctx.job.metadata)
+                    
+                    dial_info = {}
+                    if phone_match:
+                        dial_info["phone_number"] = phone_match.group(1)
+                    if transfer_match:
+                        dial_info["transfer_to"] = transfer_match.group(1)
+                    
+                    logger.info(f"Extracted phone info using regex: {dial_info}")
+            else:
+                # If it's already a dict, use it directly
+                dial_info = ctx.job.metadata
+        else:
+            dial_info = {}
+    except Exception as e:
+        logger.warning(f"Error parsing metadata: {e}. Using default values")
+        dial_info = {}
+    
+    # Set default values if not provided in metadata
+    if "phone_number" not in dial_info:
+        dial_info["phone_number"] = os.getenv("DEFAULT_PHONE_NUMBER", "")
+    if "transfer_to" not in dial_info:
+        dial_info["transfer_to"] = os.getenv("DEFAULT_TRANSFER_NUMBER", "")
+    if "prospect_name" not in dial_info:
+        dial_info["prospect_name"] = "there"  # Default greeting if no name is provided
+
+    logger.info(f"Using dial_info: {dial_info}")
 
     # look up the user's phone number and appointment details
     agent = OutboundCaller(
-        name="Jayden",
-        appointment_time="next Tuesday at 3pm",
+        name=dial_info.get("prospect_name", "there"),
+        appointment_time="next Tuesday at 3pm",  # This is not used in the sales script but required by the constructor
         dial_info=dial_info,
     )
 
     # the following uses GPT-4o, Deepgram and Cartesia
     session = AgentSession(
-        turn_detection=turn_detector.EOUModel(),
+        turn_detection="vad",  # Use simpler VAD-based turn detection
         vad=silero.VAD.load(),
         stt=deepgram.STT(),
         # you can also use OpenAI's TTS with openai.TTS()
@@ -200,15 +249,17 @@ async def entrypoint(ctx: JobContext):
         session.start(
             agent=agent,
             room=ctx.room,
-            room_input_options=RoomInputOptions(
-                # enable Krisp background voice and noise removal
-                noise_cancellation=noise_cancellation.BVC(),
-            ),
         )
     )
 
     # `create_sip_participant` starts dialing the user
     try:
+        # Only proceed with the call if we have a phone number
+        if not dial_info["phone_number"]:
+            logger.error("Cannot make outbound call: no phone number provided")
+            ctx.shutdown()
+            return
+            
         await ctx.api.sip.create_sip_participant(
             api.CreateSIPParticipantRequest(
                 room_name=ctx.room.name,
