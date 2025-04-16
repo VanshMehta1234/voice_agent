@@ -21,7 +21,7 @@ from livekit.agents import (
 )
 from livekit.plugins import (
     deepgram,
-    openai,
+    google,
     cartesia,
     silero,
     turn_detector,
@@ -34,6 +34,11 @@ logger = logging.getLogger("outbound-caller")
 logger.setLevel(logging.INFO)
 
 outbound_trunk_id = os.getenv("SIP_OUTBOUND_TRUNK_ID")
+
+# Check if Google API key is set
+google_api_key = os.getenv("GOOGLE_API_KEY")
+if not google_api_key:
+    logger.warning("GOOGLE_API_KEY environment variable is not set. Gemini API will not work properly.")
 
 
 class OutboundCaller(Agent):
@@ -208,7 +213,7 @@ async def entrypoint(ctx: JobContext):
                 # If it's already a dict, use it directly
                 dial_info = ctx.job.metadata
         else:
-            dial_info = {}
+            dial_info = {}  
     except Exception as e:
         logger.warning(f"Error parsing metadata: {e}. Using default values")
         dial_info = {}
@@ -230,16 +235,17 @@ async def entrypoint(ctx: JobContext):
         dial_info=dial_info,
     )
 
-    # the following uses GPT-4o, Deepgram and Cartesia
+    # the following uses Gemini Live API for speech-to-speech interactions
     session = AgentSession(
-        turn_detection="vad",  # Use simpler VAD-based turn detection
-        vad=silero.VAD.load(),
-        stt=deepgram.STT(),
-        # you can also use OpenAI's TTS with openai.TTS()
-        tts=cartesia.TTS(),
-        llm=openai.LLM(model="gpt-4o"),
-        # you can also use a speech-to-speech model like OpenAI's Realtime API
-        # llm=openai.realtime.RealtimeModel()
+        # Gemini has built-in turn detection so we don't need to specify it
+        # Using Gemini's Live API as an all-in-one speech-to-speech model
+        llm=google.beta.realtime.RealtimeModel(
+            model="gemini-2.0-flash-exp",
+            voice="Charon",  # Gemini voice to use
+            temperature=0.7,
+            # Pass the agent instructions directly to Gemini
+            instructions=agent.instructions,
+        ),
     )
 
     # start the session first before dialing, to ensure that when the user picks up
